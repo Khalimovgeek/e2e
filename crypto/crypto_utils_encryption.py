@@ -5,7 +5,7 @@ def encrypt_message(key: bytes, plaintext: bytes):
     aesgcm = AESGCM(key)
     nonce  = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce,
-                                data=plaintext,
+                                plaintext,
                                 associated_data=None
     )
 
