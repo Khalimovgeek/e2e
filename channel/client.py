@@ -26,8 +26,8 @@ class user:
 
         self.users = users
 
-    async def disconnect(self):
-        await websockets.Close(self.uri)
+    # async def disconnect(self):
+    #     await websockets.Close(self.uri)
 
 
 
@@ -48,7 +48,7 @@ class user:
             response = await self.websocket.recv()
             response = json.loads(response)
             # print server response
-            print(f"server reply :{response["response"]}")
+            print(f"server reply :{response}")
 
 
     async def recieve(self):
@@ -58,18 +58,18 @@ class user:
 
 
 
-async def main():
-    user1 = user("albin111")
+# async def main():
+#     user1 = user("albin111")
     
-    user2 = user("albin354234")
+#     user2 = user("albin354234")
 
-    await user1.connect()
-    await user2.connect()
+#     await user1.connect()
+#     await user2.connect()
 
-    print(f"server current users {user1.users}")
-    await user1.send("hi", "albin354234")
-    await user1.disconnect()
-    await user2.recieve()
-    await user2.disconnect()
+#     print(f"server current users {user1.users}")
+#     await user1.send("hi", "albin354234")
+#     await user1.disconnect()
+#     await user2.recieve()
+#     await user2.disconnect()
 
-asyncio.run(main())
+# asyncio.run(main())
