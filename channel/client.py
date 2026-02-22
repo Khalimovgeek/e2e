@@ -19,6 +19,7 @@ class user:
                 }
             )
         )
+        print(self.username)
 
 
 
@@ -37,9 +38,9 @@ class user:
 
             #get server response
             response = await self.websocket.recv()
-            
+            response = json.loads(response)
             # print server response
-            print(f"server reply :{response}")
+            print(f"server reply :{response["response"]}")
 
 
     async def recieve(self):
@@ -54,8 +55,8 @@ async def main():
     
     user2 = user("albin")
 
-    user1.connect()
-    user2.connect()
+    await user1.connect()
+    await user2.connect()
 
     await user1.send("hi", "albin")
     await user2.recieve()
