@@ -5,18 +5,24 @@ from rest_framework import status
 
 # list of users
 connected_users ={}
-
+userlist = []
 async def handler(websocket):
     #user gets registered 
     register = await websocket.recv()
     data = json.loads(register)
-
+    
     # gets userdata
     username = data["username"]
 
     # save the websocket
     connected_users[username] = websocket
-
+    userlist.append(username)
+    await websocket.send(json.dumps(
+        {
+            "users" : userlist
+        }
+    ))
+    
     # debug print for user connected
     print(f"username {username}")
 
@@ -59,6 +65,7 @@ async def handler(websocket):
     finally:
         del connected_users[username]
         print(f"{username} disconnected")
+
 
 
 async def main():

@@ -19,7 +19,15 @@ class user:
                 }
             )
         )
-        print(self.username)
+        
+
+        users = await self.websocket.recv()
+        users = json.loads(users)["users"]
+
+        self.users = users
+
+    async def disconnect(self):
+        await websockets.Close(self.uri)
 
 
 
@@ -46,19 +54,22 @@ class user:
     async def recieve(self):
         while True:
             response = await self.websocket.recv()
-            print(response)
+            return response
 
 
 
 async def main():
-    user1 = user("albin1")
+    user1 = user("albin111")
     
-    user2 = user("albin")
+    user2 = user("albin354234")
 
     await user1.connect()
     await user2.connect()
 
-    await user1.send("hi", "albin")
+    print(f"server current users {user1.users}")
+    await user1.send("hi", "albin354234")
+    await user1.disconnect()
     await user2.recieve()
+    await user2.disconnect()
 
 asyncio.run(main())
