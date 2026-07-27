@@ -27,7 +27,9 @@ class PeerStore:
 class Node:
     def __init__(self, server_url):
         self.server_url = server_url
-        
+        self.username = ""
+        self.current_target_id = None
+        self.id_to_name = {} # Map IDs to Usernames for display
         # 1. Generate Identity: Exchange Keys (X25519) and Signing Keys (Ed25519)
         self.x_keys = generate_x25519_keypair()
         self.e_keys = generate_e25519_keypair()
@@ -94,35 +96,62 @@ class Node:
     async def listen(self, ws):
         async for message in ws:
             data = json.loads(message)
-            
-            # CASE 1: The server is sending us keys we asked for
-            if data.get("type") == "KEY_REPLY":
+            msg_type = data.get("type")
+
+            if msg_type == "SYSTEM":
+                print(f"\n[SYSTEM]: {data.get('message')}")
+                # If target is offline, clear our current chat
+                if "offline" in data.get('message').lower():
+                    self.current_target_id = None
+                continue
+
+            # 1. HANDLE USER LIST
+            if msg_type == "USER_LIST":
+                print("\n--- Online Users ---")
+                for u in data.get("users", []):
+                    print(f"ID: {u['id']} | Name: {u['name']}")
+                print("--------------------\n")
+                continue
+
+            # 2. HANDLE KEY REPLIES (Fixed nesting)
+            if msg_type == "KEY_REPLY":
                 target_id = data.get("target")
-                keys = data.get("keys")
-                if keys:
-                    # Save the keys so prepare_payload can find them
-                    self.peers.add_peer(target_id, keys["x"], keys["e"])
-                    print(f"\n[*] Received keys for {target_id}. Ready to chat.")
+                keys_data = data.get("keys") # This is now {"public_keys": {...}, "username": ...}
+                
+                if keys_data:
+                    pub_keys = keys_data.get("public_keys")
+                    # Extract x and e from the nested dict
+                    self.peers.add_peer(target_id, pub_keys["x"], pub_keys["e"])
+                    self.id_to_name[target_id] = keys_data.get("username", target_id)
+                    print(f"\n[*] Keys for {self.id_to_name[target_id]} received.")
                 else:
                     print(f"\n[!] Server: User {target_id} not found.")
                 continue
 
-            # CASE 2: A normal chat message from another node
+            # 3. HANDLE MESSAGES
             if "from" in data:
                 sender_id = data["from"]
                 content = await self.process_incoming(sender_id, data["payload"])
-                print(f"\n[{sender_id}]: {content}")
+                # Use name if we know it, otherwise use ID
+                display_name = self.id_to_name.get(sender_id, sender_id)
+                print(f"\n[{display_name}]: {content}")
+
     async def start(self):
+        # 1. Ask for username BEFORE connecting
+        self.username = await aioconsole.ainput("Enter your username: ")
+        
         uri = f"{self.server_url}/ws/{self.node_id}"
         async with websockets.connect(uri) as ws:
-            # 1. Register our keys immediately
+            # 2. Now the first message has the real name
             registration = {
                 "public_keys": {
                     "x": self.x_keys["public"],
                     "e": self.e_keys["public"]
-                }
+                },
+                "username": self.username
             }
             await ws.send(json.dumps(registration))
+            print(f"[*] Registered as {self.username}. ID: {self.node_id}")
             
             await asyncio.gather(self.listen(ws), self.chat(ws))
 
@@ -136,24 +165,56 @@ class Node:
         # For a quick fix, we can just handle it in the listen loop.
 
     async def chat(self, ws):
-        while True:
-            target = await aioconsole.ainput("\nTarget ID: ")
-            
-            # FIX: Check .keys dictionary, not the object itself
-            if target not in self.peers.keys: 
-                print(f"[*] Fetching keys for {target}...")
-                await self.get_remote_keys(ws, target)
-                await asyncio.sleep(0.5) 
-                
-                if target not in self.peers.keys:
-                    print("[!] Target not found on server.")
-                    continue
+        
+        print(f"[*] Registered as {self.username}. Commands: /list, /chat <id>, /exit")
 
-            msg = await aioconsole.ainput("Message: ")
-            # Now encryption will work because keys are in self.peers
-            packet = await self.prepare_payload(msg, target)
-            await ws.send(json.dumps(packet))
+        while True:
+            prompt = f"[{self.username} -> {self.current_target_id or 'NONE'}]: "
+            user_input = await aioconsole.ainput(prompt)
+            
+            if user_input.startswith("/"):
+                parts = user_input.split()
+                cmd = parts[0].lower()
+
+                if cmd == "/list":
+                    await ws.send(json.dumps({"type": "LIST_USERS"}))
+                
+                elif cmd == "/chat" and len(parts) > 1:
+                    target_id = parts[1]
+                    if target_id not in self.peers.keys:
+                        print(f"[*] Requesting keys for {target_id}...")
+                        await self.get_remote_keys(ws, target_id)
+                        await asyncio.sleep(0.5) # Wait for KEY_REPLY
+                    
+                    if target_id in self.peers.keys:
+                        self.current_target_id = target_id
+                        print(f"[*] Now chatting with {self.id_to_name.get(target_id, target_id)}")
+                
+                elif cmd == "/exit":
+                    break
+                elif cmd == "/name" and len(parts) > 1:
+                    new_name = parts[1]
+                    self.username = new_name
+                    # Notify the server
+                    await ws.send(json.dumps({
+                        "type": "UPDATE_NAME",
+                        "username": new_name
+                    }))
+                    print(f"[*] Name changed to {new_name}")
+            else:
+                if not self.current_target_id:
+                    print("[!] Use /chat <id> first.")
+                    continue
+                
+                # Logic: Only send if we have a target
+                packet = await self.prepare_payload(user_input, self.current_target_id)
+                if packet:
+                    await ws.send(json.dumps(packet))
 
 if __name__ == "__main__":
     node = Node("ws://localhost:8000")
-    asyncio.run(node.start())
+    try:
+        asyncio.run(node.start())
+    except KeyboardInterrupt:
+        print("system shut down")
+        sys.exit(0)
