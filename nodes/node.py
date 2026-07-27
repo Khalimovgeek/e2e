@@ -18,7 +18,6 @@ from crypto.crypto_utils_verify import verify_sign
 class PeerStore:
     def __init__(self):
         self.keys = {} # { "node_id": {"exchange_pub": ..., "signing_pub": ...} }
-
     def add_peer(self, node_id, exchange_pub, signing_pub):
         self.keys[node_id] = {
             "exchange_pub": exchange_pub,
@@ -39,93 +38,121 @@ class Node:
         self.peers = PeerStore()
 
     async def prepare_payload(self, message, target_id):
-        """Wraps the cryptic pipeline into a transportable JSON"""
         peer = self.peers.keys.get(target_id)
-        if not peer:
-            return None
+        if not peer: return None
 
-        # Derive shared secret using OUR private and THEIR public X25519 key
         shared_key = generate_session_key(self.x_keys["private"], peer["exchange_pub"])
         
-        # Encrypt
-        encrypted_bundle = encrypt_message(shared_key, message)
+        # Ensure message is bytes for your AES utility
+        msg_bytes = message.encode('utf-8') if isinstance(message, str) else message
+        encrypted_bundle = encrypt_message(shared_key, msg_bytes)
         
-        # Sign the ciphertext+nonce to prevent tampering
-        # We use the Ed25519 private key for this
-        to_sign = encrypted_bundle["ciphertext"] + encrypted_bundle["nonce"]
-        signature = sign_message(self.e_keys["private"], to_sign)
+        # Normalize to strings for JSON transport
+        ciphertext = base64.b64decode(encrypted_bundle["ciphertext"])
+        nonce = base64.b64decode(encrypted_bundle["nonce"])
+        payload = ciphertext + nonce
+        signature = sign_message(self.e_keys["private"], payload)
+
+        # FINAL JSON WRAP: Ensure all fields are strings (Base64)
+        def finalize(val):
+            if isinstance(val, bytes):
+                return base64.b64encode(val).decode('utf-8')
+            return str(val).strip()
 
         return {
             "target": target_id,
             "payload": {
-                "ciphertext": encrypted_bundle["ciphertext"],
-                "nonce": encrypted_bundle["nonce"],
-                "signature": signature,
-                "signing_pub": self.e_keys["public"], # Provide our signing pub for verification
-                "exchange_pub": self.x_keys["public"] # Provide our exchange pub for their next reply
+                "ciphertext": finalize(ciphertext),
+                "nonce": finalize(nonce),
+                "signature": finalize(signature),
+                "signing_pub": self.e_keys["public"],
+                "exchange_pub": self.x_keys["public"]
             }
         }
 
     async def process_incoming(self, sender_id, data):
-        """Unwraps incoming JSON and verifies/decrypts"""
         try:
-            # 1. Store/Update peer keys from the message header
-            self.peers.add_peer(sender_id, data["exchange_pub"], data["signing_pub"])
-            
-            # 2. Verify Signature
-            to_verify = data["ciphertext"] + data["nonce"]
-            is_valid = verify_sign(data["signing_pub"], to_verify, data["signature"])
-            
-            if not is_valid:
-                return "[!] Signature mismatch! Message tampered."
+            ciphertext_bytes = base64.b64decode(data["ciphertext"])
+            nonce_bytes = base64.b64decode(data["nonce"])
 
-            # 3. Decrypt
+            payload = ciphertext_bytes + nonce_bytes
+            is_valid = verify_sign(
+                data["signing_pub"],
+                payload,
+                data["signature"]        
+            )
+            if not is_valid:
+                return "[!] Signature mismatch!"
+
+            # ... rest of decryption ...
             shared_key = generate_session_key(self.x_keys["private"], data["exchange_pub"])
             decrypted = decrypt_message(shared_key, data["ciphertext"], data["nonce"])
-            return decrypted.decode()
+            return decrypted.decode('utf-8')
+
         except Exception as e:
             return f"[!] Decryption error: {str(e)}"
-
-    async def start(self):
-        uri = f"{self.server_url}/ws/{self.node_id}"
-        async with websockets.connect(uri) as ws:
-            print(f"[*] Node Online. ID: {self.node_id}")
-            
-            # Run receiver and sender
-            await asyncio.gather(
-                self.listen(ws),
-                self.chat(ws)
-            )
-
     async def listen(self, ws):
         async for message in ws:
             data = json.loads(message)
-            sender_id = data["from"]
-            content = await self.process_incoming(sender_id, data["payload"])
-            print(f"\n[{sender_id}]: {content}")
+            
+            # CASE 1: The server is sending us keys we asked for
+            if data.get("type") == "KEY_REPLY":
+                target_id = data.get("target")
+                keys = data.get("keys")
+                if keys:
+                    # Save the keys so prepare_payload can find them
+                    self.peers.add_peer(target_id, keys["x"], keys["e"])
+                    print(f"\n[*] Received keys for {target_id}. Ready to chat.")
+                else:
+                    print(f"\n[!] Server: User {target_id} not found.")
+                continue
+
+            # CASE 2: A normal chat message from another node
+            if "from" in data:
+                sender_id = data["from"]
+                content = await self.process_incoming(sender_id, data["payload"])
+                print(f"\n[{sender_id}]: {content}")
+    async def start(self):
+        uri = f"{self.server_url}/ws/{self.node_id}"
+        async with websockets.connect(uri) as ws:
+            # 1. Register our keys immediately
+            registration = {
+                "public_keys": {
+                    "x": self.x_keys["public"],
+                    "e": self.e_keys["public"]
+                }
+            }
+            await ws.send(json.dumps(registration))
+            
+            await asyncio.gather(self.listen(ws), self.chat(ws))
+
+    async def get_remote_keys(self, ws, target_id):
+        """Ask the channel for a target's public keys"""
+        await ws.send(json.dumps({
+            "type": "GET_KEY",
+            "target": target_id
+        }))
+        # In a real app, you'd wait for the KEY_REPLY message.
+        # For a quick fix, we can just handle it in the listen loop.
 
     async def chat(self, ws):
         while True:
-            target = await aioconsole.ainput("Target ID (or 'handshake'): ")
-            msg = await aioconsole.ainput("Message: ")
+            target = await aioconsole.ainput("\nTarget ID: ")
             
-            # In a real cryptic system, first message is a handshake
-            # For this redo, we just send keys with every message for simplicity
+            # FIX: Check .keys dictionary, not the object itself
+            if target not in self.peers.keys: 
+                print(f"[*] Fetching keys for {target}...")
+                await self.get_remote_keys(ws, target)
+                await asyncio.sleep(0.5) 
+                
+                if target not in self.peers.keys:
+                    print("[!] Target not found on server.")
+                    continue
+
+            msg = await aioconsole.ainput("Message: ")
+            # Now encryption will work because keys are in self.peers
             packet = await self.prepare_payload(msg, target)
-            if packet:
-                await ws.send(json.dumps(packet))
-            else:
-                # If peer unknown, we send a 'discovery' packet with just our keys
-                print("[*] Peer unknown. Sending handshake...")
-                handshake = {
-                    "target": target,
-                    "payload": {
-                        "ciphertext": "", "nonce": "", "signature": "",
-                        "signing_pub": self.e_keys["public"],
-                        "exchange_pub": self.x_keys["public"]
-                    }
-                }
-                await ws.send(json.dumps(handshake))
+            await ws.send(json.dumps(packet))
 
 if __name__ == "__main__":
     node = Node("ws://localhost:8000")
